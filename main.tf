@@ -20,8 +20,8 @@ module "resourcegroup" {
 
 resource "azurerm_storage_account" "this" {
   name                     = "iotpm13001"
-  resource_group_name         = module.resourcegroup.name
-  location                    = var.location
+  resource_group_name      = module.resourcegroup.name
+  location                 = var.location
   account_tier             = "Standard"
   account_replication_type = "LRS"
 }
@@ -46,21 +46,38 @@ resource "azurerm_iothub" "this" {
     name     = "F1" # B1, B2, B3, F1, S1, S2, and S3
     capacity = "1"
   }
-  endpoint {
-    type                       = "AzureIotHub.StorageContainer"
-    connection_string          = azurerm_storage_account.this.primary_blob_connection_string
-    name                       = "export"
-    batch_frequency_in_seconds = 60
-    max_chunk_size_in_bytes    = 10485760
-    container_name             = azurerm_storage_container.this.name
-    encoding                   = "Avro"
-    file_name_format           = "{iothub}/{partition}_{YYYY}_{MM}_{DD}_{HH}_{mm}"
-  }  
   tags = {
     CostCenter = "ABC000CBA"
     By         = "parisamoosavinezhad@hotmail.com"
   }
 }
+
+resource "null_resource" "register_iot_device" {
+  depends_on = [
+    azurerm_iothub.this
+  ]
+  triggers = { always_run = timestamp() }
+  provisioner "local-exec" {
+    command     = "chmod +x ${path.module}/1-iot-device-identity/script.sh ;${path.module}/1-iot-device-identity/script.sh"
+    interpreter = ["bash", "-c"]
+    environment = {
+      iothub_name        = "iot-pm-13001"
+      iothub_device_name = "myEdgeDevice"
+    }
+  }
+}
+
+
+
+/*
+ configure file upload for IoT Hub
+ video: https://www.youtube.com/watch?v=RI-tQnLsPJ0&list=PL1ljc761XCiYVaDEfS4X-f493capyL-cL&index=1
+ step: https://github.com/microsoft/AzureDeepStreamAccelerator/blob/main/documentation/quickstart-readme.md
+ concept: https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-devguide-file-upload
+ how-to: https://learn.microsoft.com/en-us/azure/iot-hub/iot-hub-configure-file-upload-cli
+
+*/
+
 
 module "vm_name" {
   source             = "github.com/ParisaMousavi/az-naming//vm?ref=main"
@@ -93,7 +110,7 @@ resource "azurerm_network_interface" "this_win" {
 
   ip_configuration {
     name                          = "internal"
-    subnet_id                     = data.terraform_remote_state.network.outputs.subnets["vm-linux"].id
+    subnet_id                     = data.terraform_remote_state.network.outputs.subnets["vm-win"].id
     private_ip_address_allocation = "Dynamic"
     public_ip_address_id          = azurerm_public_ip.this_win.id
   }
@@ -104,13 +121,20 @@ resource "azurerm_network_interface_security_group_association" "this_win" {
   network_security_group_id = data.terraform_remote_state.network.outputs.nsg_id
 }
 
+locals {
+  admin_password = "P@$$w0rd1234!"
+  admin_username = "adminuser"
+}
 resource "azurerm_windows_virtual_machine" "this_win" {
   name                = "${var.name}-win"
   location            = module.resourcegroup.location
   resource_group_name = module.resourcegroup.name
   size                = "Standard_D4s_v4" #"Standard_B2s" #"Standard_F2"
-  admin_username      = "adminuser"
-  admin_password      = "P@$$w0rd1234!"
+  admin_username      = local.admin_username
+  admin_password      = local.admin_password
+  provision_vm_agent  = true
+  timezone            = "Romance Standard Time"
+  custom_data         = base64encode(file("${path.module}/0-files/winrm.ps1"))
   network_interface_ids = [
     azurerm_network_interface.this_win.id,
   ]
@@ -120,6 +144,21 @@ resource "azurerm_windows_virtual_machine" "this_win" {
     storage_account_type = "Standard_LRS"
   }
 
+  # winrm_listener {
+  #   protocol = "http"
+  # }
+
+  # # Auto-Login's required to configure WinRM
+  # additional_unattend_content {
+  #   setting = "AutoLogon"
+  #   content = "<AutoLogon><Password><Value>${local.admin_password}</Value></Password><Enabled>true</Enabled><LogonCount>1</LogonCount><Username>${local.admin_username}</Username></AutoLogon>"
+  # }
+
+  # additional_unattend_content {
+  #   setting = "FirstLogonCommands"
+  #   content = file("${path.module}/0-files/FirstLogonCommands.xml")
+  # }
+
   # az vm image list --all --publisher MicrosoftWindowsDesktop --location westeurope --offer "windows11preview-arm64"
   source_image_reference {
     publisher = "MicrosoftWindowsDesktop"
@@ -127,6 +166,21 @@ resource "azurerm_windows_virtual_machine" "this_win" {
     sku       = "win11-22h2-pro"
     version   = "latest"
   }
+
+  # provisioner "remote-exec" {
+  #   connection {
+  #     host     = azurerm_public_ip.this_win.ip_address
+  #     type     = "winrm"
+  #     user     = local.admin_username
+  #     password = local.admin_password
+  #     port     = 5985
+  #     https    = true
+  #     timeout  = "5m"
+  #   }
+  #   inline = [
+  #     "write-Host 'Enable nested virtualization by using a script' -NoNewline",
+  #   ]
+  # }
 
 }
 
@@ -158,6 +212,7 @@ resource "azurerm_virtual_machine_data_disk_attachment" "this_win" {
 
 # Install and start the IoT Edge runtime
 # https://learn.microsoft.com/en-us/azure/iot-edge/quickstart?view=iotedge-1.4#install-and-start-the-iot-edge-runtime
+# Nvidia link: https://docs.nvidia.com/cuda/eflow-users-guide/index.html
 
 module "acr_name" {
   source             = "github.com/ParisaMousavi/az-naming//acr?ref=2022.10.07"
